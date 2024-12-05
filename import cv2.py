@@ -1,85 +1,82 @@
 import cv2
 import numpy as np
+import os
 
-def process_frame(frame):
-    
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    
-    lower_road = np.array([0, 0, 0])
-    upper_road = np.array([180, 255, 50])
-    road_mask = cv2.inRange(hsv, lower_road, upper_road)
-    
-    
-    lower_sidewalk1 = np.array([0, 100, 100])
-    upper_sidewalk1 = np.array([10, 255, 255])
-    lower_sidewalk2 = np.array([160, 100, 100])
-    upper_sidewalk2 = np.array([180, 255, 255])
-    sidewalk_mask1 = cv2.inRange(hsv, lower_sidewalk1, upper_sidewalk1)
-    sidewalk_mask2 = cv2.inRange(hsv, lower_sidewalk2, upper_sidewalk2)
-    sidewalk_mask = cv2.bitwise_or(sidewalk_mask1, sidewalk_mask2)
-
-    
-    lower_white = np.array([0, 0, 200])
-    upper_white = np.array([180, 50, 255])
-    white_mask = cv2.inRange(hsv, lower_white, upper_white)
-    bright_white = cv2.bitwise_and(frame, frame, mask=white_mask)
-    bright_white[np.where((bright_white != [0, 0, 0]).all(axis=2))] = [255, 255, 255]
-
-   
-    road_sidewalk_mask = cv2.bitwise_or(road_mask, sidewalk_mask)
-    result = cv2.bitwise_and(frame, frame, mask=road_sidewalk_mask)
-
-   
-    result = cv2.addWeighted(result, 1, bright_white, 1, 0)
-
-    
-    edges = cv2.Canny(white_mask, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    
-    contours, _ = cv2.findContours(white_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    for contour in contours:
-        approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
-        area = cv2.contourArea(contour)
-        if len(approx) >= 4 and area > 500: 
-            x, y, w, h = cv2.boundingRect(approx)
-            aspect_ratio = float(w) / h
-            if 0.5 < aspect_ratio < 2.0:  
-                cv2.rectangle(result, (x, y), (x + w, y + h), (255, 0, 0), 2)
-
-    return result
-
-def main():
-   
-    video_path = input("비디오 파일 경로를 입력하세요: ")
-    
-    
+def extract_frames(video_path, output_dir, interval=1):
     cap = cv2.VideoCapture(video_path)
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_count = 0
+    saved_count = 0
 
-    while cap.isOpened():
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
+            
+        if frame_count % (fps * interval) == 0:
+            frame_path = os.path.join(output_dir, f"frame_{saved_count}.jpg")
+            cv2.imwrite(frame_path, frame)
+            saved_count += 1
 
-       
-        result = process_frame(frame)
-
-        
-        cv2.imshow('Original', frame)
-        cv2.imshow('Road and Sidewalk Detection', result)
-
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        frame_count += 1
 
     cap.release()
+    print(f"Frames saved in {output_dir}")
+
+def segment_road_and_sidewalk(image):
+    
+    resized = cv2.resize(image, (640, 360))
+    roi = resized[180:, :]
+
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.equalizeHist(l) 
+    enhanced = cv2.merge((l, a, b))
+    roi_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+    Z = roi_enhanced.reshape((-1, 3))
+    Z = np.float32(Z)
+
+    k = 5 
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(Z, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+    centers = np.uint8(centers)
+    segmented = centers[labels.flatten()]
+    segmented_image = segmented.reshape(roi.shape)
+
+    hsv = cv2.cvtColor(segmented_image, cv2.COLOR_BGR2HSV)
+
+    road_lower = np.array([0, 0, 30]) 
+    road_upper = np.array([180, 70, 220])
+    road_mask = cv2.inRange(hsv, road_lower, road_upper)
+
+    road_segmented = cv2.bitwise_and(segmented_image, segmented_image, mask=road_mask)
+
+    result = cv2.addWeighted(roi, 0.7, road_segmented, 0.3, 0)
+    return result
+
+
+
+def main(video_path, output_dir):
+    extract_frames(video_path, output_dir)
+
+    for frame_file in sorted(os.listdir(output_dir)):
+        frame_path = os.path.join(output_dir, frame_file)
+        frame = cv2.imread(frame_path)
+
+        road_segmented = segment_road_and_sidewalk(frame)
+        cv2.imshow("Road and Sidewalk Segmentation (Improved)", road_segmented)
+
+        if cv2.waitKey(1000) & 0xFF == ord('q'):
+            break
+
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    main()
-
+    video_path = "/Users/zeonons/Documents/opencv.mp4"
+    output_dir = "frames"    
+    main(video_path, output_dir)
