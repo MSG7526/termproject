@@ -1,97 +1,85 @@
 import cv2
 import numpy as np
-from ultralytics import YOLO 
-import os
 
-def extract_frames(video_path, output_dir, frame_rate=1):
-    """동영상에서 지정된 간격으로 프레임을 추출합니다."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
+def process_frame(frame):
+    
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    
+    lower_road = np.array([0, 0, 0])
+    upper_road = np.array([180, 255, 50])
+    road_mask = cv2.inRange(hsv, lower_road, upper_road)
+    
+    
+    lower_sidewalk1 = np.array([0, 100, 100])
+    upper_sidewalk1 = np.array([10, 255, 255])
+    lower_sidewalk2 = np.array([160, 100, 100])
+    upper_sidewalk2 = np.array([180, 255, 255])
+    sidewalk_mask1 = cv2.inRange(hsv, lower_sidewalk1, upper_sidewalk1)
+    sidewalk_mask2 = cv2.inRange(hsv, lower_sidewalk2, upper_sidewalk2)
+    sidewalk_mask = cv2.bitwise_or(sidewalk_mask1, sidewalk_mask2)
+
+    
+    lower_white = np.array([0, 0, 200])
+    upper_white = np.array([180, 50, 255])
+    white_mask = cv2.inRange(hsv, lower_white, upper_white)
+    bright_white = cv2.bitwise_and(frame, frame, mask=white_mask)
+    bright_white[np.where((bright_white != [0, 0, 0]).all(axis=2))] = [255, 255, 255]
+
+   
+    road_sidewalk_mask = cv2.bitwise_or(road_mask, sidewalk_mask)
+    result = cv2.bitwise_and(frame, frame, mask=road_sidewalk_mask)
+
+   
+    result = cv2.addWeighted(result, 1, bright_white, 1, 0)
+
+    
+    edges = cv2.Canny(white_mask, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            cv2.line(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    
+    contours, _ = cv2.findContours(white_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
+        area = cv2.contourArea(contour)
+        if len(approx) >= 4 and area > 500: 
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect_ratio = float(w) / h
+            if 0.5 < aspect_ratio < 2.0:  
+                cv2.rectangle(result, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+    return result
+
+def main():
+   
+    video_path = input("비디오 파일 경로를 입력하세요: ")
+    
+    
     cap = cv2.VideoCapture(video_path)
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    frame_interval = int(fps * frame_rate)
-    
-    frame_count = 0
-    saved_count = 0
-    
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
+
+       
+        result = process_frame(frame)
+
         
-        if frame_count % frame_interval == 0:
-            frame_path = os.path.join(output_dir, f"frame_{saved_count}.jpg")
-            cv2.imwrite(frame_path, frame)
-            saved_count += 1
+        cv2.imshow('Original', frame)
+        cv2.imshow('Road and Sidewalk Detection', result)
+
         
-        frame_count += 1
-    
-    cap.release()
-    return saved_count
-
-def segment_road_and_sidewalk(frame, segmentation_model):
-    """세그먼테이션 모델을 사용하여 도로와 인도를 구분합니다."""
-
-    result = segmentation_model(frame)
-    segmented_frame = result.segmentation_map  
-    return segmented_frame
-
-def detect_traffic_light(frame, yolo_model):
-    """YOLO 모델을 사용하여 신호등을 탐지합니다."""
-    results = yolo_model(frame)
-    traffic_light_status = "Unknown"
-    
-    for result in results:
-        if result["class"] == "traffic_light": 
-           
-            x, y, w, h = result["bbox"]
-            traffic_light = frame[y:y+h, x:x+w]
-            avg_color = np.mean(traffic_light, axis=(0, 1))
-            if avg_color[2] > avg_color[1]: 
-                traffic_light_status = "Stop"
-            else:
-                traffic_light_status = "Go"
-    return traffic_light_status
-
-def detect_crosswalk(frame, yolo_model):
-    """YOLO 모델을 사용하여 횡단보도를 탐지합니다."""
-    results = yolo_model(frame)
-    crosswalk_detected = False
-    
-    for result in results:
-        if result["class"] == "crosswalk":
-            crosswalk_detected = True
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-    return crosswalk_detected
 
-def analyze_video(video_path):
-    """동영상을 분석하여 도로, 신호등, 횡단보도를 탐지합니다."""
-  
-    yolo_model = YOLO("yolov8n.pt")
-    segmentation_model = None 
-    
-    output_dir = "frames"
-    frame_count = extract_frames(video_path, output_dir)
-    
-    for i in range(frame_count):
-        frame_path = os.path.join(output_dir, f"frame_{i}.jpg")
-        frame = cv2.imread(frame_path)
-        
-   
-        if segmentation_model:
-            segmented_frame = segment_road_and_sidewalk(frame, segmentation_model)
-            cv2.imshow("Segmented", segmented_frame)
-        
-      
-        traffic_light_status = detect_traffic_light(frame, yolo_model)
-        print(f"Frame {i}: Traffic Light - {traffic_light_status}")
-        
-  
-        crosswalk_detected = detect_crosswalk(frame, yolo_model)
-        print(f"Frame {i}: Crosswalk - {'Detected' if crosswalk_detected else 'Not Detected'}")
-    
+    cap.release()
     cv2.destroyAllWindows()
 
+if __name__ == "__main__":
+    main()
 
-analyze_video(r"C:\Users\qoran\Videos\녹음 2024-12-05 141249.mp4")
